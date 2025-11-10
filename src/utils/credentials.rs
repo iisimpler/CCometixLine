@@ -33,32 +33,46 @@ fn get_oauth_token_macos() -> Option<String> {
 
     let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
 
-    let output = Command::new("security")
-        .args([
-            "find-generic-password",
-            "-a",
-            &user,
-            "-w",
-            "-s",
-            "Claude Code-credentials",
-        ])
-        .output();
+    // Try multiple possible service names for Claude Code credentials
+    let service_names = vec![
+        "Claude Code-credentials",
+        "claude-code-credentials",
+        "Claude Code",
+        "claude-code",
+        "anthropic-ai/claude-code",
+        "@anthropic-ai/claude-code",
+    ];
 
-    match output {
-        Ok(output) if output.status.success() => {
-            let json_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !json_str.is_empty() {
-                if let Ok(creds_file) = serde_json::from_str::<CredentialsFile>(&json_str) {
-                    return creds_file.claude_ai_oauth.map(|oauth| oauth.access_token);
+    for service_name in service_names {
+        let output = Command::new("security")
+            .args([
+                "find-generic-password",
+                "-a",
+                &user,
+                "-w",
+                "-s",
+                service_name,
+            ])
+            .output();
+
+        match output {
+            Ok(output) if output.status.success() => {
+                let json_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !json_str.is_empty() {
+                    // Try to parse as JSON credentials file
+                    if let Ok(creds_file) = serde_json::from_str::<CredentialsFile>(&json_str) {
+                        if let Some(token) = creds_file.claude_ai_oauth.map(|oauth| oauth.access_token) {
+                            return Some(token);
+                        }
+                    }
                 }
             }
-            None
-        }
-        _ => {
-            // Fallback to file-based credentials
-            get_oauth_token_file()
+            _ => continue,
         }
     }
+
+    // Fallback to file-based credentials
+    get_oauth_token_file()
 }
 
 fn get_oauth_token_file() -> Option<String> {
@@ -76,5 +90,28 @@ fn get_oauth_token_file() -> Option<String> {
 
 fn get_credentials_path() -> Option<PathBuf> {
     let home = dirs::home_dir()?;
+
+    // Try multiple possible credential file locations
+    let possible_paths = vec![
+        home.join(".claude").join(".credentials.json"),
+        home.join(".claude").join("credentials.json"),
+        home.join("Library")
+            .join("Application Support")
+            .join("claude-code")
+            .join(".credentials.json"),
+        home.join("Library")
+            .join("Application Support")
+            .join("@anthropic-ai")
+            .join("claude-code")
+            .join(".credentials.json"),
+    ];
+
+    for path in possible_paths {
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    // Return default path even if it doesn't exist
     Some(home.join(".claude").join(".credentials.json"))
 }
