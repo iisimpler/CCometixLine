@@ -149,13 +149,22 @@ impl UsageSegment {
         token: &str,
         timeout_secs: u64,
     ) -> Option<ApiUsageResponse> {
+        let debug = std::env::var("CCLINE_DEBUG").is_ok();
         let url = format!("{}/api/oauth/usage", api_base_url);
         let user_agent = Self::get_claude_code_version();
+
+        if debug {
+            eprintln!("[DEBUG] API URL: {}", url);
+            eprintln!("[DEBUG] User-Agent: {}", user_agent);
+        }
 
         let mut agent_builder = ureq::AgentBuilder::new();
 
         // Configure proxy from Claude settings if available
         if let Some(proxy_url) = Self::get_proxy_from_settings() {
+            if debug {
+                eprintln!("[DEBUG] Using proxy: {}", proxy_url);
+            }
             if let Ok(proxy) = ureq::Proxy::new(&proxy_url) {
                 agent_builder = agent_builder.proxy(proxy);
             }
@@ -163,18 +172,44 @@ impl UsageSegment {
 
         let agent = agent_builder.build();
 
-        let response = agent
+        let response = match agent
             .get(&url)
             .set("Authorization", &format!("Bearer {}", token))
             .set("anthropic-beta", "oauth-2025-04-20")
             .set("User-Agent", &user_agent)
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .call()
-            .ok()?;
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                if debug {
+                    eprintln!("[DEBUG] API request error: {:?}", e);
+                }
+                return None;
+            }
+        };
+
+        if debug {
+            eprintln!("[DEBUG] API response status: {}", response.status());
+        }
 
         if response.status() == 200 {
-            response.into_json().ok()
+            match response.into_json::<ApiUsageResponse>() {
+                Ok(data) => Some(data),
+                Err(e) => {
+                    if debug {
+                        eprintln!("[DEBUG] Failed to parse API response: {:?}", e);
+                    }
+                    None
+                }
+            }
         } else {
+            if debug {
+                eprintln!("[DEBUG] Non-200 status code: {}", response.status());
+                if let Ok(body) = response.into_string() {
+                    eprintln!("[DEBUG] Response body: {}", body);
+                }
+            }
             None
         }
     }
@@ -182,7 +217,23 @@ impl UsageSegment {
 
 impl Segment for UsageSegment {
     fn collect(&self, _input: &InputData) -> Option<SegmentData> {
-        let token = credentials::get_oauth_token()?;
+        // Check for debug mode via environment variable
+        let debug = std::env::var("CCLINE_DEBUG").is_ok();
+
+        let token = match credentials::get_oauth_token() {
+            Some(t) => {
+                if debug {
+                    eprintln!("[DEBUG] Successfully got OAuth token (length: {})", t.len());
+                }
+                t
+            }
+            None => {
+                if debug {
+                    eprintln!("[DEBUG] Failed to get OAuth token");
+                }
+                return None;
+            }
+        };
 
         // Load config from file to get segment options
         let config = crate::config::Config::load().ok()?;
@@ -203,13 +254,24 @@ impl Segment for UsageSegment {
             .and_then(|v| v.as_u64())
             .unwrap_or(2);
 
+        if debug {
+            eprintln!("[DEBUG] API base URL: {}", api_base_url);
+            eprintln!("[DEBUG] Cache duration: {}s", cache_duration);
+            eprintln!("[DEBUG] Timeout: {}s", timeout);
+        }
+
         let cached_data = self.load_cache();
         let use_cached = cached_data
             .as_ref()
             .map(|cache| self.is_cache_valid(cache, cache_duration))
             .unwrap_or(false);
 
+        let debug = std::env::var("CCLINE_DEBUG").is_ok();
+
         let (five_hour_util, seven_day_util, resets_at) = if use_cached {
+            if debug {
+                eprintln!("[DEBUG] Using cached data");
+            }
             let cache = cached_data.unwrap();
             (
                 cache.five_hour_utilization,
@@ -217,8 +279,16 @@ impl Segment for UsageSegment {
                 cache.resets_at,
             )
         } else {
+            if debug {
+                eprintln!("[DEBUG] Fetching fresh data from API...");
+            }
             match self.fetch_api_usage(api_base_url, &token, timeout) {
                 Some(response) => {
+                    if debug {
+                        eprintln!("[DEBUG] API call successful!");
+                        eprintln!("[DEBUG] 5-hour utilization: {}", response.five_hour.utilization);
+                        eprintln!("[DEBUG] 7-day utilization: {}", response.seven_day.utilization);
+                    }
                     let cache = ApiUsageCache {
                         five_hour_utilization: response.five_hour.utilization,
                         seven_day_utilization: response.seven_day.utilization,
@@ -233,13 +303,22 @@ impl Segment for UsageSegment {
                     )
                 }
                 None => {
+                    if debug {
+                        eprintln!("[DEBUG] API call failed!");
+                    }
                     if let Some(cache) = cached_data {
+                        if debug {
+                            eprintln!("[DEBUG] Falling back to stale cache");
+                        }
                         (
                             cache.five_hour_utilization,
                             cache.seven_day_utilization,
                             cache.resets_at,
                         )
                     } else {
+                        if debug {
+                            eprintln!("[DEBUG] No cache available, returning None");
+                        }
                         return None;
                     }
                 }
